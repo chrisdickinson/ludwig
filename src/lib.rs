@@ -3,8 +3,7 @@ use std::pin::Pin;
 use std::borrow::Cow;
 use futures::Future;
 use futures::prelude::*;
-use std::marker::PhantomData;
-use route_recognizer::{Router, Params};
+use route_recognizer::Router;
 use std::sync::Arc;
 mod responses;
 mod context;
@@ -193,8 +192,10 @@ impl<'a, ApplicationState, RequestState> Application<'a, ApplicationState, Reque
 
     pub async fn execute(&self, req: http_types::Request) -> Option<Response<'a>> {
         if let Ok(matchinfo) = self.router.recognize(req.url().path()) {
-            let context = Context::new(self.app_state.clone(), Default::default(), HashMap::new());
-            Some((self.handlers[**matchinfo.handler()].action)(context).await)
+            let idx = **matchinfo.handler();
+            let context = Context::new(self.app_state.clone(), Default::default(), matchinfo.params().clone(), req);
+
+            Some((self.handlers[idx].action)(context).await)
         } else {
             None
         }

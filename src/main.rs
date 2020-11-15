@@ -9,10 +9,11 @@ use ludwig::{ Context, EmptyContext, Application };
 use serde_json::json;
 use maplit::hashmap;
 
-async fn hello(_context: EmptyContext) -> anyhow::Result<(u16, HashMap<&'static str, &'static str>, &'static str)> {
+async fn hello(context: EmptyContext) -> anyhow::Result<(u16, HashMap<&'static str, &'static str>, String)> {
+    let param = context.params().find("who").unwrap();
     Ok((201, hashmap!(
         "x-clacks-overhead" => "GNU/Terry Pratchett"
-    ), "hello world"))
+    ), format!("hello {}", param)))
 }
 
 async fn world(_context: EmptyContext) -> anyhow::Result<serde_json::Value> {
@@ -42,7 +43,7 @@ async fn main() -> http_types::Result<()> {
     println!("listening on {}", addr);
 
     let app = Arc::new(Application::new(())
-        .route(("hello", "GET", "/hello", hello))
+        .route(("hello", "GET", "/hello/:who", hello))
         .route(("world", "GET", "/world", world))
         .route(("how", "GET", "/how", how))
         .route(("are", "GET", "/are", are))

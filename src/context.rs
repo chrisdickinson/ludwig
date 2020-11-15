@@ -1,18 +1,21 @@
 use std::sync::Arc;
 use std::collections::HashMap;
+use route_recognizer::Params;
 
 pub struct Context<AppState, RequestState> {
     app_state: Arc<AppState>,
     request_state: RequestState,
-    headers: HashMap<String, String>,
+    params: Params,
+    request: http_types::Request
 }
 
 impl<AppState, RequestState> Context<AppState, RequestState> {
-    pub fn new(app_state: Arc<AppState>, request_state: RequestState, headers: HashMap<String, String>) -> Self {
+    pub fn new(app_state: Arc<AppState>, request_state: RequestState, params: Params, request: http_types::Request) -> Self {
         Context {
             app_state,
             request_state,
-            headers
+            request,
+            params,
         }
     }
 
@@ -28,12 +31,24 @@ impl<AppState, RequestState> Context<AppState, RequestState> {
         &self.request_state
     }
 
-    pub fn request_state_mut(&mut self) -> &mut RequestState {
-        &mut self.request_state
+    pub fn url(&self) -> &http_types::Url {
+        self.request.url()
     }
 
-    pub fn headers(&self) -> &HashMap<String, String> {
-        &self.headers
+    pub fn url_mut(&mut self) -> &mut http_types::Url {
+        self.request.url_mut()
+    }
+
+    pub fn params(&self) -> &Params {
+        &self.params
+    }
+
+    pub fn params_mut(&mut self) -> &mut Params {
+        &mut self.params
+    }
+
+    pub fn request_state_mut(&mut self) -> &mut RequestState {
+        &mut self.request_state
     }
 }
 
