@@ -3,29 +3,33 @@ use async_std::prelude::*;
 use async_std::task;
 use http_types::{Response, StatusCode};
 use std::collections::HashMap;
+use std::sync::Arc;
 
-use ludwig::{ Context, Handler };
+use ludwig::{ Context, EmptyContext, Application };
 use serde_json::json;
+use maplit::hashmap;
 
-async fn hello(_context: Context<(), ()>) -> anyhow::Result<(u16, &'static str)> {
-    Ok((201, "hello world"))
+async fn hello(_context: EmptyContext) -> anyhow::Result<(u16, HashMap<&'static str, &'static str>, &'static str)> {
+    Ok((201, hashmap!(
+        "x-clacks-overhead" => "GNU/Terry Pratchett"
+    ), "hello world"))
 }
 
-async fn world(_context: Context<(), ()>) -> anyhow::Result<serde_json::Value> {
+async fn world(_context: EmptyContext) -> anyhow::Result<serde_json::Value> {
     Ok(json!({
         "message": "hello world"
     }))
 }
 
-async fn how(_context: Context<(), ()>) -> Result<String, std::io::Error> {
+async fn how(_context: EmptyContext) -> Result<String, std::io::Error> {
     Ok(async_std::fs::read_to_string("/usr/share/dict/words").await?)
 }
 
-async fn are(_context: Context<(), ()>) -> &'static str {
+async fn are(_context: EmptyContext) -> &'static str {
     "okay, I guess"
 }
 
-async fn you(_context: Context<(), ()>) {
+async fn you(_context: EmptyContext) {
     println!("sometimes you just wanna 204 No Content! I'm not gonna judge")
 }
 
@@ -37,12 +41,21 @@ async fn main() -> http_types::Result<()> {
     let addr = format!("http://{}", listener.local_addr()?);
     println!("listening on {}", addr);
 
+    let app = Arc::new(Application::new(())
+        .route(("hello", "GET", "/hello", hello))
+        .route(("world", "GET", "/world", world))
+        .route(("how", "GET", "/how", how))
+        .route(("are", "GET", "/are", are))
+        .route(("you", "GET", "/you", you))
+        );
+
     // For each incoming TCP connection, spawn a task and call `accept`.
     let mut incoming = listener.incoming();
     while let Some(stream) = incoming.next().await {
         let stream = stream?;
+        let app = app.clone();
         task::spawn(async {
-            if let Err(err) = accept(stream).await {
+            if let Err(err) = accept(stream, app).await {
                 eprintln!("{}", err);
             }
         });
@@ -52,26 +65,23 @@ async fn main() -> http_types::Result<()> {
 
 use std::borrow::Borrow;
 // Take a TCP stream, and convert it into sequential HTTP request / response pairs.
-async fn accept(stream: TcpStream) -> http_types::Result<()> {
+async fn accept<'a>(stream: TcpStream, app: Arc<Application<'a, (), ()>>) -> http_types::Result<()> {
     println!("starting new connection from {}", stream.peer_addr()?);
-    async_h1::accept(stream.clone(), |_req| async move {
-        let handler = Handler::<(), ()>::new("hello".to_string(), "GET".to_string(), "/".to_string(), hello)?;
-        let handler = Handler::<(), ()>::new("hello".to_string(), "GET".to_string(), "/".to_string(), world)?;
-        let handler = Handler::<(), ()>::new("hello".to_string(), "GET".to_string(), "/".to_string(), how)?;
-        let handler = Handler::<(), ()>::new("hello".to_string(), "GET".to_string(), "/".to_string(), are)?;
-        let handler = Handler::<(), ()>::new("hello".to_string(), "GET".to_string(), "/".to_string(), you)?;
-
-        let context = Context::new(std::sync::Arc::new(()), (), HashMap::new());
-        let result = (handler.action)(context).await;
-
-        let mut res = Response::new(result.status);
-        for (key, value) in result.headers {
-            let key: &str = key.borrow();
-            let value: &str = value.borrow();
-            res.insert_header(key, value);
+    let hurk = app.clone();
+    async_h1::accept(stream.clone(), |req| async {
+        if let Some(result) = app.execute(req).await {
+            let mut res = Response::new(result.status);
+            for (key, value) in result.headers {
+                let key: &str = key.borrow();
+                let value: &str = value.borrow();
+                res.insert_header(key, value);
+            }
+            res.set_body(result.body);
+            Ok(res)
+        } else {
+            let res = Response::new(404);
+            Ok(res)
         }
-        res.set_body(result.body);
-        Ok(res)
     })
     .await?;
     Ok(())

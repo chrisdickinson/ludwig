@@ -1,99 +1,29 @@
-#![feature(async_closure)]
-
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::pin::Pin;
 use std::borrow::Cow;
 use futures::Future;
 use futures::prelude::*;
+use std::marker::PhantomData;
+use route_recognizer::{Router, Params};
+use std::sync::Arc;
+mod responses;
+mod context;
 
+pub use crate::responses::*;
+pub use crate::context::*;
 
-// - middleware produces a handler
-// - handlers accept context and produce a response
-// - responses are anything that we know how to turn into a http response
-// - it is the frameworks job to liberally accept whatever handlers return and 
-//   represent it as a "response" enum
-//
-// acceptable responses:
-// - [-] streams of data (NB: this is tricky because streams impl From for (), strings that
-//   conflict with our impls)
-// - [x] json
-// - [x] strings
-// - [x] static strs
-// - [x] static slices
-// - [x] vec<u8>
-// - [x] impl std::error::Error
-// - [ ] HashMap< String, any of the above >
-// - [ ] Vec< of any of the above >
-// - [x] unit
-// - [x] tuple (u16, <any of the above>)
-// - [x] tuple (u16, HashMap<String, String>, <any of the above>)
-// - [ ] Body of any of the above
-// - [ ] Result< of any of the above >
-
-pub enum Body {
-    Empty,
-    ByteSlice(&'static [u8]),
-    ByteVec(Vec<u8>),
-    Str(&'static str),
-    String(String),
-    JSON(serde_json::Value),
-    Error(Box<dyn std::error::Error>),
-    Map(HashMap<String, Body>),
-    List(Vec<Body>),
-}
-
-impl Into<http_types::Body> for Body {
-    fn into(self) -> http_types::Body {
-        match self {
-            Body::Empty => http_types::Body::empty(),
-            Body::Str(xs) => xs.into(),
-            Body::String(xs) => xs.into(),
-            Body::JSON(xs) => xs.into(),
-            _ => unimplemented!("oh no")
-        }
-    }
-}
-
-impl Default for Body {
-    fn default() -> Self {
-        Body::Empty
-    }
-}
-
-// XXX: maybe structure this as a tuple?
-#[derive(Default)]
-pub struct Response<'a> {
-    pub body: Body,
-    pub headers: HashMap<Cow<'a, str>, Cow<'a, str>>,
-    pub status: u16
-}
-
-pub struct Context<AppState, RequestState> {
-    application: Arc<AppState>,
-    context: RequestState,
-    headers: HashMap<String, String>,
-}
-
-impl<AppState, RequestState> Context<AppState, RequestState> {
-    pub fn new(application: Arc<AppState>, context: RequestState, headers: HashMap<String, String>) -> Self {
-        Context {
-            application,
-            context,
-            headers
-        }
-    }
-}
+pub type HandlerFuture<'a> = Pin<Box<dyn Future<Output = Response<'a>> + Send + Sync + 'a>>;
+pub type HandlerFunction<'a, AppState, RequestState> = Box<dyn Fn(Context<AppState, RequestState>) -> HandlerFuture<'a> + Send + Sync>;
 
 pub struct Handler<'a, AppState: Send + Sync, RequestState: Send + Sync> {
     name: String,
     method: String,
     route: String,
-    pub action: Box<dyn Fn(Context<AppState, RequestState>) -> Pin<Box<dyn Future<Output = Response<'a>> + Send + Sync + 'a>> + Send + Sync>
+    pub action: HandlerFunction<'a, AppState, RequestState>
 }
 
 impl<'a> From<()> for Response<'a> {
-    fn from(value: ()) -> Response<'a> {
+    fn from(_: ()) -> Response<'a> {
         Response {
             status: 204,
             body: Body::Empty,
@@ -195,29 +125,78 @@ impl<'a, T> From<(u16, T)> for Response<'a>
     }
 }
 
-impl<'a, T> From<(u16, HashMap<Cow<'a, str>, Cow<'a, str>>, T)> for Response<'a>
-    where T: Into<Response<'a>> {
-    fn from(value: (u16, HashMap<Cow<'a, str>, Cow<'a, str>>, T)) -> Response<'a> {
+impl<'a, T, K, V> From<(u16, HashMap<K, V>, T)> for Response<'a>
+    where
+        T: Into<Response<'a>>,
+        K: Into<Cow<'a, str>>,
+        V: Into<Cow<'a, str>> {
+    fn from(value: (u16, HashMap<K, V>, T)) -> Response<'a> {
         let mut response = value.2.into();
         response.status = value.0;
-        response.headers.extend(value.1);
+        for (k, v) in value.1 {
+            response.headers.insert(k.into(), v.into());
+        }
         response
     }
 }
 
-impl<'a, AppState: Send + Sync, RequestState: Send + Sync> Handler<'a, AppState, RequestState> {
-    pub fn new<Fut, F, E>(name: String, method: String, route: String, handler: F) -> anyhow::Result<Self>
-        where F: (Fn(Context<AppState, RequestState>) -> Fut) + Send + Sync + 'static,
-              Fut: Future<Output = E> + Send + Sync + 'static,
-              E: Send + Sync + Into<Response<'a>> {
-
-        Ok(Handler {
+impl<'a, AS, RS, Name, Method, Route, F, Fut, E> From<(Name, Method, Route, F)> for Handler<'a, AS, RS>
+where 
+    AS: Send + Sync,
+    RS: Send + Sync,
+    Name: AsRef<str>,
+    Method: AsRef<str>,
+    Route: AsRef<str>,
+    F: (Fn(Context<AS, RS>) -> Fut) + Send + Sync + 'static,
+    Fut: Future<Output = E> + Send + Sync + 'static,
+    E: Send + Sync + Into<Response<'a>> {
+    fn from(value: (Name, Method, Route, F)) -> Handler<'a, AS, RS> {
+        let (name, method, route, handler) = value;
+        let name = name.as_ref().to_string();
+        let method = method.as_ref().to_string();
+        let route = route.as_ref().to_string();
+        Handler {
             name,
             method,
             route,
             action: Box::new(move |context| {
                 Box::pin(handler(context).map(|xs| xs.into()))
             })
-        })
+        }
+    }
+}
+
+pub struct Application<'a, ApplicationState: Send + Sync, RequestState: Default + Send + Sync> {
+    app_state: Arc<ApplicationState>,
+    router: Router<usize>,
+    handlers: Vec<Handler<'a, ApplicationState, RequestState>>
+}
+
+impl<'a, ApplicationState, RequestState> Application<'a, ApplicationState, RequestState> 
+    where ApplicationState: Send + Sync,
+          RequestState: Default + Send + Sync {
+    pub fn new(app_state: ApplicationState) -> Self {
+        Application {
+            app_state: Arc::new(app_state),
+            router: Router::new(),
+            handlers: Vec::new()
+        }
+    }
+
+    pub fn route<T: Into<Handler<'a, ApplicationState, RequestState>>>(mut self, handler: T) -> Self {
+        let handler = handler.into();
+        let route = handler.route.as_ref();
+        self.router.add(route, self.handlers.len());
+        self.handlers.push(handler);
+        self
+    }
+
+    pub async fn execute(&self, req: http_types::Request) -> Option<Response<'a>> {
+        if let Ok(matchinfo) = self.router.recognize(req.url().path()) {
+            let context = Context::new(self.app_state.clone(), Default::default(), HashMap::new());
+            Some((self.handlers[**matchinfo.handler()].action)(context).await)
+        } else {
+            None
+        }
     }
 }

@@ -15,6 +15,7 @@ async-trait = "0.1.41"
 anyhow = "1.0.34"
 http-types = "2.7.0"
 maplit = "1.0.2"
+route-recognizer = "0.3.0"
 
 [dependencies.async-std]
 version = "1.7.0"
